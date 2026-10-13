@@ -5,24 +5,23 @@
 #include "tusb.h"
 #include "usb_serial.h"
 
-static volatile uint32_t g_ms = 0;
 static uint32_t g_led_last = 0;
 
 void SysTick_Handler(void)
 {
-    g_ms++;
+    ms_ticks++;
 }
 
 uint32_t tusb_time_millis_api(void)
 {
-    return g_ms;
+    return ms_ticks;
 }
 
 void tusb_time_delay_ms_api(uint32_t ms)
 {
-    uint32_t start = g_ms;
+    uint32_t start = ms_ticks;
 
-    while ((uint32_t)(g_ms - start) < ms)
+    while ((uint32_t)(ms_ticks - start) < ms)
     {
         __NOP();
     }
@@ -111,9 +110,9 @@ static void led_init(void)
 
 static void led_task(void)
 {
-    if ((uint32_t)(g_ms - g_led_last) >= 1000U)
+    if ((uint32_t)(ms_ticks - g_led_last) >= 1000U)
     {
-        g_led_last = g_ms;
+        g_led_last = ms_ticks;
         GPIOC->ODR ^= (1U << 13U);
     }
 }
@@ -230,7 +229,6 @@ void usb_serial_init(void)
     while (!tud_cdc_connected())
     {
         tud_task();
-        led_task();
     }
 
     for (volatile uint32_t i = 0; i < 500000U; ++i)
@@ -242,7 +240,6 @@ void usb_serial_init(void)
 int usb_serial_getchar(void)
 {
     tud_task();
-    led_task();
 
     if (!tud_cdc_available())
     {
