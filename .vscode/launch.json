@@ -8,8 +8,8 @@
       "args": [],
       "stopAtEntry": false,
       "externalConsole": true,
-      "cwd": "c:/Users/vinic/OneDrive/Documentos/Disciplinas/Embarcados/Tarefas/TarefasEmbarcados/Tarefa3/PROJ1/src",
-      "program": "c:/Users/vinic/OneDrive/Documentos/Disciplinas/Embarcados/Tarefas/TarefasEmbarcados/Tarefa3/PROJ1/src/build/Debug/outDebug",
+      "cwd": "c:/Users/vinic/OneDrive/Documentos/Disciplinas/Embarcados/Tarefas/TarefasEmbarcados/Tarefa3/PROJ1",
+      "program": "c:/Users/vinic/OneDrive/Documentos/Disciplinas/Embarcados/Tarefas/TarefasEmbarcados/Tarefa3/PROJ1/build/Debug/outDebug",
       "MIMode": "gdb",
       "miDebuggerPath": "gdb",
       "setupCommands": [

@@ -190,6 +190,7 @@ int main(void)
 
     while (1)
     {
+        tud_task();
         switch (state)
         {
             case MORSE_STATE_IDLE:

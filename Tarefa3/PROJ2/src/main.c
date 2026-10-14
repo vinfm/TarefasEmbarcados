@@ -137,6 +137,7 @@ int main(void)
 
     while (1)
     {
+        tud_task();
         switch (state)
         {
             case STATE_TEST_READY:
