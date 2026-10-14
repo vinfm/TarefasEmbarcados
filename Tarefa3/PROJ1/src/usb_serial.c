@@ -13,6 +13,11 @@ void SysTick_Handler(void)
     ms_ticks++;
 }
 
+void usb_serial_task(void)
+{
+    tud_task();
+}
+
 uint32_t tusb_time_millis_api(void)
 {
     return ms_ticks;

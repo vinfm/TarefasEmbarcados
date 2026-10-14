@@ -169,7 +169,7 @@ int main(void)
 
     while (1)
     {
-        tud_task();
+        usb_serial_task();
         switch (state)
         {
             case RHYTHM_STATE_DEMO_INIT:

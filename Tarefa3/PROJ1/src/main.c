@@ -127,7 +127,7 @@ int main(void)
 
     while (1)
     {
-        tud_task();
+        usb_serial_task();
         // Verifica se houve evento de clique valido registrado pela ISR
         if (button_event != 0U)
         {

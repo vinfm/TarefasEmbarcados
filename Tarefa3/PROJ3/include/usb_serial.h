@@ -6,5 +6,5 @@
 extern volatile uint32_t ms_ticks;
 void usb_serial_init(void);
 int usb_serial_getchar(void);
-
+void usb_serial_task(void);
 #endif
