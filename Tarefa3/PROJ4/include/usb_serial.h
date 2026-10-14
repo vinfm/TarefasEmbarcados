@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-volatile uint32_t ms_ticks = 0;
+extern volatile uint32_t ms_ticks;
 void usb_serial_init(void);
 int usb_serial_getchar(void);
 

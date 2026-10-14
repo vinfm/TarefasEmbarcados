@@ -6,6 +6,7 @@
 #include "usb_serial.h"
 
 static uint32_t g_led_last = 0;
+volatile uint32_t ms_ticks = 0;
 
 void SysTick_Handler(void)
 {

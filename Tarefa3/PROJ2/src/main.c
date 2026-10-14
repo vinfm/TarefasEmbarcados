@@ -1,124 +1,253 @@
 #include "stm32f4xx.h"
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include "usb_serial.h"
 
-#define BUTTON_PIN  0U      // Botao USER da BlackPill: PA0
-#define LED_PIN     13U     // LED onboard: PC13 (ativo em nivel baixo)
+/* Configuracoes de Hardware para STM32F411CE BlackPill */
+#define BUTTON_PIN      0U      // Botao USER: PA0 (ativo em nivel baixo / GND)
+#define LED_PIN         13U     // LED Onboard: PC13 (ativo em nivel baixo)
 
-#define DEBOUNCE_MS 20U
+/* Parametros de Temporizacao */
+#define DEBOUNCE_MS         50U     // Janela de debounce para detecção rápida do clique
+#define RANDOM_DELAY_MIN_MS 2000U   // Tempo minimo de espera secreta (2 segundos)
+#define RANDOM_DELAY_MAX_MS 5000U   // Tempo maximo de espera secreta (5 segundos)
+#define COOLDOWN_DELAY_MS   2500U   // Intervalo antes de reiniciar uma nova rodada
 
-extern volatile uint32_t ms_ticks;
-// Alterada dentro da interrupcao e lida no programa principal.
-// volatile impede o compilador de assumir que o valor nao muda sozinho.
-volatile uint8_t button_event = 0U;
+/* Estados da FSM (Maquina de Estados Finitos) */
+typedef enum
+{
+    STATE_TEST_READY,           // Inicializa a rodada e envia aviso de pronto
+    STATE_WAIT_RANDOM_DELAY,    // Espera secreta com verificacao de queima de largada
+    STATE_WAIT_REACTION,        // LED aceso, medindo tempo ate o clique do usuario
+    STATE_ROUND_COOLDOWN        // Pausa pos-resultado antes de iniciar novo teste
+} reaction_state_t;
 
+/* Variaveis compartilhadas com a ISR (marcadas como volatile) */
+static volatile uint32_t last_btn_irq_tick = 0U;
+static volatile uint32_t button_press_timestamp = 0U;
+static volatile uint8_t  button_event = 0U;
+
+/* Variavel para semente do gerador pseudo-aleatorio */
+static uint32_t prng_state = 0xA5A5A5A5U;
+
+/**
+ * @brief Gera um numero pseudo-aleatorio dentro de uma faixa [min, max].
+ *        Algoritmo LCG (Linear Congruential Generator).
+ */
+static uint32_t get_random_range(uint32_t min, uint32_t max)
+{
+    // Alimenta a semente com o SysTick corrente para aumentar o entropia
+    prng_state ^= ms_ticks;
+    prng_state = (prng_state * 1664525U) + 1013904223U;
+
+    return min + (prng_state % (max - min + 1U));
+}
+
+/**
+ * @brief Inicializa o GPIO PC13 para controle do LED onboard.
+ */
 static void led_init(void)
 {
-    // 1) Habilita o clock do GPIOC
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
 
-    // 2) PC13 como saida (MODER13 = 01)
     GPIOC->MODER &= ~(3U << (LED_PIN * 2U));
     GPIOC->MODER |=  (1U << (LED_PIN * 2U));
 
-    // Push-pull e sem pull-up/pull-down
     GPIOC->OTYPER &= ~(1U << LED_PIN);
     GPIOC->PUPDR  &= ~(3U << (LED_PIN * 2U));
 
-    // LED da BlackPill e ativo em nivel baixo.
-    // PC13 = 1 -> LED apagado.
+    // LED onboard e ativo em nivel baixo. Inicia apagado (PC13 = 1).
     GPIOC->BSRR = (1U << LED_PIN);
 }
 
+static inline void led_on(void)
+{
+    GPIOC->BSRR = (1U << (LED_PIN + 16U)); // Nivel baixo acende
+}
+
+static inline void led_off(void)
+{
+    GPIOC->BSRR = (1U << LED_PIN);          // Nivel alto apaga
+}
+
+/**
+ * @brief Inicializa a interrupcao externa (EXTI0) no pino PA0.
+ */
 static void button_interrupt_init(void)
 {
-    // 1) Habilita o clock do GPIOA
     RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
 
-    // 2) PA0 como entrada (MODER0 = 00)
     GPIOA->MODER &= ~(3U << (BUTTON_PIN * 2U));
 
-    // 3) Pull-up interno em PA0.
-    // Solto: PA0 = 1
-    // Pressionado: PA0 = 0
+    // Pull-up interno: Solto = 1, Pressionado = 0
     GPIOA->PUPDR &= ~(3U << (BUTTON_PIN * 2U));
     GPIOA->PUPDR |=  (1U << (BUTTON_PIN * 2U));
 
-    // 4) Habilita o bloco SYSCFG, que conecta GPIO -> EXTI
     RCC->APB2ENR |= RCC_APB2ENR_SYSCFGEN;
 
-    // 5) Seleciona PA0 como fonte da linha EXTI0.
-    // EXTICR1[3:0] = 0000 -> Port A
-    SYSCFG->EXTICR[0] &= ~(0xFU << 0U);
-
-    // 6) Libera a linha EXTI0 para gerar interrupcao
+    SYSCFG->EXTICR[0] &= ~(0xFU << 0U); // Linha EXTI0 mapeada para GPIOA
     EXTI->IMR |= EXTI_IMR_MR0;
 
-    // 7) Queremos interrupcao quando o botao for pressionado.
-    // Como PA0 vai de 1 para 0, usamos borda de descida.
+    // Disparo na borda de descida (quando pressiona)
     EXTI->RTSR &= ~EXTI_RTSR_TR0;
     EXTI->FTSR |=  EXTI_FTSR_TR0;
 
-    // Limpa eventual interrupcao pendente antes de habilitar o NVIC
     EXTI->PR = EXTI_PR_PR0;
 
-    // 8) Configura o NVIC do Cortex-M4
     NVIC_SetPriority(EXTI0_IRQn, 5U);
     NVIC_EnableIRQ(EXTI0_IRQn);
 }
 
+/**
+ * @brief Tratador da interrupcao EXTI0 (Botao USER - PA0).
+ *        Grava o timestamp do momento exato do clique com filtro de debounce.
+ */
 void EXTI0_IRQHandler(void)
 {
     if ((EXTI->PR & EXTI_PR_PR0) != 0U)
     {
-        // No STM32F4, escreve-se 1 no bit PR para limpar a pendencia.
         EXTI->PR = EXTI_PR_PR0;
 
-        // A ISR apenas registra o evento.
-        // O trabalho principal fica fora da interrupcao.
-        button_event = 1U;
+        uint32_t now = ms_ticks;
+        if ((now - last_btn_irq_tick) >= DEBOUNCE_MS)
+        {
+            last_btn_irq_tick = now;
+            button_press_timestamp = now;
+            button_event = 1U;
+        }
     }
 }
 
-void delay_ms(uint32_t ms)
+int main(void)
 {
-    uint32_t start = ms_ticks;
-
-    while ((ms_ticks - start) < ms)
-    {
-        // espera
-    }
-}
-
-// Coloca pino em nível alto
-void led_set()
-{
-    GPIOC->BSRR = (1U << LED_PIN);
-}
-
-
-// Coloca pino em nível baixo
-void led_clr()
-{
-    GPIOC->BSRR = (1U << (LED_PIN + 16U));
-}
-
-// LED da BlackPill é ativo em nível baixo
-#define LED_ON()   led_clr()
-#define LED_OFF()  led_set()
-
-int main(void) {
     usb_serial_init();
     led_init();
     button_interrupt_init();
 
-    while (1) {
-        if (button_event != 0U)
-        {   delay_ms(DEBOUNCE_MS);
-            button_event = 0U;
+    reaction_state_t state = STATE_TEST_READY;
+    uint32_t state_start_tick = 0U;
+    uint32_t random_delay = 0U;
+    uint32_t reaction_start_tick = 0U;
+
+    printf("\r\n========================================\r\n");
+    printf("   Atividade 3 - Tarefa B: Tempo de Reacao\r\n");
+    printf("========================================\r\n");
+    fflush(stdout);
+
+    while (1)
+    {
+        switch (state)
+        {
+            case STATE_TEST_READY:
+            {
+                // Garante LED apagado
+                led_off();
+
+                // Descarta eventuais cliques anteriores
+                __disable_irq();
+                button_event = 0U;
+                __enable_irq();
+
+                // Mensagem de teste pronto conforme enunciado
+                printf("\r\nTeste pronto! Aguarde o LED acender...\r\n");
+                fflush(stdout);
+
+                // Sorteia tempo secreto em segundos (convertido em ms)
+                random_delay = get_random_range(RANDOM_DELAY_MIN_MS, RANDOM_DELAY_MAX_MS);
+                state_start_tick = ms_ticks;
+
+                state = STATE_WAIT_RANDOM_DELAY;
+                break;
+            }
+
+            case STATE_WAIT_RANDOM_DELAY:
+            {
+                // Se o usuário pressionar o botão antes do tempo expirar: QUEIMA DE LARGADA!
+                if (button_event != 0U)
+                {
+                    __disable_irq();
+                    button_event = 0U;
+                    __enable_irq();
+
+                    // Aborta e imprime mensagem especificada
+                    printf("Muito cedo!\r\n");
+                    fflush(stdout);
+
+                    state_start_tick = ms_ticks;
+                    state = STATE_ROUND_COOLDOWN;
+                    break;
+                }
+
+                // Verifica se o tempo aleatorio em segredo decorreu
+                if ((ms_ticks - state_start_tick) >= random_delay)
+                {
+                    // Acende o LED onboard
+                    led_on();
+
+                    // Limpa qualquer evento residual
+                    __disable_irq();
+                    button_event = 0U;
+                    __enable_irq();
+
+                    // Timestamp exato do disparo visual
+                    reaction_start_tick = ms_ticks;
+
+                    // Mensagem de inicio de reacao
+                    printf("AGORA! Pressione o botao!\r\n");
+                    fflush(stdout);
+
+                    state = STATE_WAIT_REACTION;
+                }
+                break;
+            }
+
+            case STATE_WAIT_REACTION:
+            {
+                // Aguarda o clique do usuario apos o LED acender
+                if (button_event != 0U)
+                {
+                    __disable_irq();
+                    uint32_t press_tick = button_press_timestamp;
+                    button_event = 0U;
+                    __enable_irq();
+
+                    // Apaga o LED onboard
+                    led_off();
+
+                    // Calcula o tempo de reacao
+                    uint32_t reaction_time = 0U;
+                    if (press_tick >= reaction_start_tick)
+                    {
+                        reaction_time = press_tick - reaction_start_tick;
+                    }
+
+                    // Envia via serial no formato estipulado:
+                    // "Tempo de reacao: X ms"
+                    printf("Tempo de reacao: %lu ms\r\n", (unsigned long)reaction_time);
+                    fflush(stdout);
+
+                    state_start_tick = ms_ticks;
+                    state = STATE_ROUND_COOLDOWN;
+                }
+                break;
+            }
+
+            case STATE_ROUND_COOLDOWN:
+            {
+                // Aguarda um pequeno periodo com SysTick antes de reiniciar o teste
+                if ((ms_ticks - state_start_tick) >= COOLDOWN_DELAY_MS)
+                {
+                    state = STATE_TEST_READY;
+                }
+                break;
+            }
+
+            default:
+            {
+                state = STATE_TEST_READY;
+                break;
+            }
         }
-        printf("\nExemplo uso.\n");
-        fflush(stdout);
     }
 }
